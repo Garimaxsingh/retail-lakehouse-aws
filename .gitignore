@@ -1,0 +1,39 @@
+# Secrets and credentials — never commit these
+.env
+.env.*
+*.pem
+.aws/
+credentials
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Data (raw/staging landed data is reproducible from source — never commit it)
+data/
+*.parquet
+*.jsonl
+*.jsonl.gz
+
+# Spark
+spark-warehouse/
+metastore_db/
+derby.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
