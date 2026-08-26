@@ -24,9 +24,11 @@ venv/
 
 # Data (raw/staging landed data is reproducible from source — never commit it)
 data/
+generator/data_sources/raw/
 *.parquet
 *.jsonl
 *.jsonl.gz
+*.csv
 
 # Spark
 spark-warehouse/
