@@ -10,10 +10,10 @@ Trigger a backfill with:
     airflow dags trigger retail_lakehouse_backfill \
         --conf '{"start_date": "2024-06-01", "end_date": "2024-06-07"}'
 
-Safe to re-run: backfill_range.py uses Iceberg's overwritePartitions(),
-which only replaces the date partitions actually reprocessed — running the
-same range twice produces identical row counts (see RESULTS.md for the
-executed proof), not compounding duplicates.
+Safe to re-run: backfill_range.py overwrites exactly the requested
+event-date range (Iceberg overwrite-by-condition) and nothing outside it —
+running the same range twice produces identical row counts with the
+neighbouring days unchanged (see RESULTS.md for the executed proof).
 """
 from datetime import datetime
 

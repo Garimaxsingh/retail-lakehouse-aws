@@ -2,22 +2,21 @@
 
 ## Stream lag exceeds 10 minutes
 
+The stream source is an S3 landing prefix (Kinesis was unavailable on this
+account — see the incident log), so "lag" means files waiting to be picked up.
+
 1. Check the Glue streaming job's CloudWatch metrics (`--enable-metrics` is
    on) for `glue.driver.streaming.lastCompletedBatchProcessingTimeMs` vs the
-   1-minute trigger interval — if batches are taking longer than the
-   trigger period, they queue up and lag grows monotonically.
-2. Check Kinesis `IteratorAgeMilliseconds` (CloudWatch, per-shard) — this is
-   the actual "how far behind is the consumer" metric, independent of Spark
-   internals.
-3. **Shard scaling decision**: this project runs 1 shard by design (budget).
-   If sustained throughput genuinely exceeds 1 shard's capacity (1MB/s in,
-   2MB/s out), `aws kinesis update-shard-count` to reshard — but check
-   whether the real cause is slow *processing* (undersized Glue workers)
-   before assuming it's an *ingestion* bottleneck; resharding doesn't fix
-   the former.
-4. If it's a processing bottleneck: `jobs/streaming/stream_order_events.py`
-   runs 2 G.1X workers — bump `number_of_workers` in `infra/glue_jobs.tf`
-   before reaching for a shard split.
+   1-minute trigger interval — if batches take longer than the trigger
+   period, they queue up and lag grows monotonically.
+2. Count files in `s3://<bucket>/stream_landing/order_events/` newer than the
+   last processed batch (the checkpoint under `checkpoints/stream_order_events/`
+   records what was processed). A growing backlog with fast batches means
+   `maxFilesPerTrigger` (50) is the limit — raise it.
+3. If batches are slow: the idempotency anti-join reads every `event_id` in
+   `fact_order_item` each micro-batch, which grows with the table. Restrict
+   it to the event dates present in the batch, or bump `number_of_workers`
+   in `infra/glue_jobs.tf`.
 
 ## Upstream schema change detected
 
@@ -54,25 +53,48 @@ safe in-place evolution in Iceberg either, and needs the same
 expand-contract pattern DataPlan (the sibling schema-migration project) is
 built to detect: add a new column, backfill, cut over readers, drop the old one.
 
-## Backfill boundary effect: ingest_date vs event_ts (found 2026-08-26)
+## Backfill overwrote data outside its range (found 2026-10-21, fixed)
 
-Running `jobs/batch/backfill_range.py` for 2024-06-01..2024-06-07 twice
-produced identical counts both times (840,146 — the actual idempotency
-proof, see RESULTS.md), but that number is 44 rows *less* than what
-`date(event_ts) BETWEEN ...` returns from the original full-table load
-(840,190). Real, understood cause: the backfill job filters the **raw**
-zone by `ingest_date` (matching the S3 partition layout), but late-arriving
-events can have `ingest_ts` — and therefore `ingest_date` — up to 90
-minutes after `event_ts`, which crosses midnight for events near the end of
-a day. A handful of 2024-06-07 `event_ts` rows land in the
-`ingest_date=2024-06-08` partition and are outside the backfill's ingest-date
-filter, while the original full-table run (no date filter at all) included
-them. This is a genuine, common backfill subtlety — ingestion-time
-partitioning never perfectly aligns with event-time boundaries once late
-data exists — not a bug in the idempotency logic itself. If a future
-backfill needs event-time-exact reprocessing, filter on a slightly widened
-ingest_date window (e.g. end_date + 1) rather than trusting ingest_date to
-equal event_ts's date.
+**What happened**: `backfill_range.py` was run twice for 2024-06-01..06-07
+on 2026-08-26 and produced identical counts both times (840,146) — so it
+looked idempotent. A later review of the code raised two suspicions, and
+read-only Athena queries on 2026-10-21 confirmed both in the live tables:
+
+| Table | Expected | Actual |
+|---|---|---|
+| `staging.order_events`, event date 2024-05-31 | 119,798 | **41** |
+| `staging.order_events`, event date 2024-06-07 | 119,924 | 119,880 |
+| `staging.order_events_quarantine`, whole table | 997,170 | **8,593** |
+
+**Causes**:
+1. The job selected raw rows by `ingest_date`, but `order_events` is
+   partitioned by `days(event_ts)`. Late events from 2024-05-31 ingested on
+   06-01 were in the input, so `overwritePartitions()` treated 05-31 as a
+   partition "present in the incoming data" and replaced it with just those
+   41 rows. Conversely, 44 events from 06-07 ingested on 06-08 were left out
+   (the 840,146 vs 840,190 gap, originally written up here as a harmless
+   boundary effect).
+2. `order_events_quarantine` was unpartitioned, so dynamic partition
+   overwrite replaced the whole table.
+
+The idempotency test only compared counts *inside* the requested range, so
+it couldn't see damage outside it. `curated.fact_order_item` was built
+before the backfill runs and was not affected.
+
+**Fix**:
+- Read `ingest_date` from start to end + 1 day (max lateness), keep rows by
+  *event* date in range, and write with Iceberg `overwrite(condition)` on the
+  `event_ts` range instead of `overwritePartitions()` — replaces exactly the
+  range, including days whose new data has no rows.
+- Partition `order_events_quarantine` by `days(event_ts)` (`raw_to_staging.py`).
+- Guard in the job: refuse to write if any row's event date is outside the range.
+- Repair: re-ran `raw_to_staging` once (full rebuild from raw), then re-ran
+  the fixed backfill twice and checked the days on both sides of the range.
+  Numbers in RESULTS.md.
+
+**Lesson**: an idempotency test must check the blast radius — the
+neighbouring partitions and every table the job writes — not only the rows
+it meant to touch.
 
 ## Backfill fails at 60%
 
@@ -150,9 +172,16 @@ snapshot until the write actually commits. Recovery:
      table instead — catalog tables resolve via the shared Glue metastore
      regardless of which session instance is asking; temp views don't.
   2. `UnsupportedOperationException: MERGE INTO TABLE is not supported
-     temporarily` — a genuine Spark 3.3 restriction (this Glue version):
-     `MERGE INTO` cannot run from inside a streaming micro-batch's execution
-     thread at all, independent of bug #1. Since the streaming path only
+     temporarily` — originally diagnosed as a Spark 3.3 restriction on
+     `MERGE INTO` inside a streaming micro-batch. **Correction
+     (2026-10-21)**: the same error then appeared in a plain *batch* job
+     (`test_scd2_merge.py`), and disappeared once the Glue jobs set
+     `spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions`.
+     Spark only supports `MERGE INTO` on Iceberg tables through those
+     extensions, so the real cause was missing configuration — not
+     streaming. All Iceberg jobs now set it (`infra/glue_jobs.tf`). The
+     streaming job keeps its anti-join (still correct and idempotent); MERGE
+     inside `foreachBatch` has not been re-tested with the extensions on. Since the streaming path only
      ever inserts (never updates an existing fact row), switched to an
      anti-join against existing `event_id`s + plain `.append()` —
      functionally identical to `WHEN NOT MATCHED THEN INSERT` for an

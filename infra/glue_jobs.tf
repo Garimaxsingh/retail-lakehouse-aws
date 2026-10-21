@@ -69,7 +69,7 @@ resource "aws_glue_job" "raw_to_staging" {
 
   default_arguments = {
     "--datalake-formats"                 = "iceberg"
-    "--conf"                             = "spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.warehouse=s3://${aws_s3_bucket.lakehouse.bucket}/staging --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO"
+    "--conf"                             = "spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.warehouse=s3://${aws_s3_bucket.lakehouse.bucket}/staging --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
     "--bucket"                           = aws_s3_bucket.lakehouse.bucket
     "--staging_database"                 = aws_glue_catalog_database.staging.name
     "--enable-continuous-cloudwatch-log" = "true"
@@ -98,7 +98,7 @@ resource "aws_glue_job" "staging_to_curated" {
 
   default_arguments = {
     "--datalake-formats"                 = "iceberg"
-    "--conf"                             = "spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.warehouse=s3://${aws_s3_bucket.lakehouse.bucket} --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO"
+    "--conf"                             = "spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.warehouse=s3://${aws_s3_bucket.lakehouse.bucket} --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
     "--bucket"                           = aws_s3_bucket.lakehouse.bucket
     "--staging_database"                 = aws_glue_catalog_database.staging.name
     "--curated_database"                 = aws_glue_catalog_database.curated.name
@@ -128,7 +128,7 @@ resource "aws_glue_job" "reconcile" {
 
   default_arguments = {
     "--datalake-formats"                 = "iceberg"
-    "--conf"                             = "spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.warehouse=s3://${aws_s3_bucket.lakehouse.bucket} --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO"
+    "--conf"                             = "spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.warehouse=s3://${aws_s3_bucket.lakehouse.bucket} --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
     "--staging_database"                 = aws_glue_catalog_database.staging.name
     "--curated_database"                 = aws_glue_catalog_database.curated.name
     "--reconcile_days"                   = "2"
@@ -158,7 +158,7 @@ resource "aws_glue_job" "backfill_range" {
 
   default_arguments = {
     "--datalake-formats" = "iceberg"
-    "--conf"             = "spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.warehouse=s3://${aws_s3_bucket.lakehouse.bucket}/staging --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO"
+    "--conf"             = "spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.warehouse=s3://${aws_s3_bucket.lakehouse.bucket}/staging --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
     "--bucket"           = aws_s3_bucket.lakehouse.bucket
     "--staging_database" = aws_glue_catalog_database.staging.name
     # start_date/end_date are placeholders — every real invocation overrides
@@ -166,6 +166,66 @@ resource "aws_glue_job" "backfill_range" {
     # job definition is valid.
     "--start_date"                       = "2024-01-01"
     "--end_date"                         = "2024-01-01"
+    "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-metrics"                   = "true"
+    "--job-language"                     = "python"
+  }
+
+  tags = {
+    Project = var.project_name
+  }
+}
+
+# One row per line item (accumulating snapshot) — the revenue-safe fact.
+# Reads curated.fact_order_item only; see jobs/batch/build_fact_order_line.py.
+resource "aws_glue_job" "build_fact_order_line" {
+  name              = "${var.project_name}-build-fact-order-line"
+  role_arn          = aws_iam_role.glue_job.arn
+  glue_version      = "4.0"
+  worker_type       = "G.1X"
+  number_of_workers = 4
+  timeout           = 60
+
+  command {
+    name            = "glueetl"
+    script_location = "s3://${aws_s3_bucket.lakehouse.bucket}/${aws_s3_object.scripts["build_fact_order_line.py"].key}"
+    python_version  = "3"
+  }
+
+  default_arguments = {
+    "--datalake-formats"                 = "iceberg"
+    "--conf"                             = "spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.warehouse=s3://${aws_s3_bucket.lakehouse.bucket} --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+    "--curated_database"                 = aws_glue_catalog_database.curated.name
+    "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-metrics"                   = "true"
+    "--job-language"                     = "python"
+  }
+
+  tags = {
+    Project = var.project_name
+  }
+}
+
+# Proves the incremental SCD2 MERGE (jobs/batch/scd2.py) on a scratch table.
+resource "aws_glue_job" "test_scd2_merge" {
+  name              = "${var.project_name}-test-scd2-merge"
+  role_arn          = aws_iam_role.glue_job.arn
+  glue_version      = "4.0"
+  worker_type       = "G.1X"
+  number_of_workers = 2
+  timeout           = 15
+
+  command {
+    name            = "glueetl"
+    script_location = "s3://${aws_s3_bucket.lakehouse.bucket}/${aws_s3_object.scripts["test_scd2_merge.py"].key}"
+    python_version  = "3"
+  }
+
+  default_arguments = {
+    "--datalake-formats"                 = "iceberg"
+    "--conf"                             = "spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.warehouse=s3://${aws_s3_bucket.lakehouse.bucket} --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+    "--extra-py-files"                   = "s3://${aws_s3_bucket.lakehouse.bucket}/${aws_s3_object.scripts["scd2.py"].key}"
+    "--curated_database"                 = aws_glue_catalog_database.curated.name
     "--enable-continuous-cloudwatch-log" = "true"
     "--enable-metrics"                   = "true"
     "--job-language"                     = "python"
@@ -201,7 +261,7 @@ resource "aws_glue_job" "stream_order_events" {
 
   default_arguments = {
     "--datalake-formats"                 = "iceberg"
-    "--conf"                             = "spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.warehouse=s3://${aws_s3_bucket.lakehouse.bucket} --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO"
+    "--conf"                             = "spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.warehouse=s3://${aws_s3_bucket.lakehouse.bucket} --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
     "--bucket"                           = aws_s3_bucket.lakehouse.bucket
     "--curated_database"                 = aws_glue_catalog_database.curated.name
     "--enable-continuous-cloudwatch-log" = "true"
@@ -216,10 +276,12 @@ resource "aws_glue_job" "stream_order_events" {
 
 output "glue_job_names" {
   value = {
-    raw_to_staging      = aws_glue_job.raw_to_staging.name
-    staging_to_curated  = aws_glue_job.staging_to_curated.name
-    reconcile           = aws_glue_job.reconcile.name
-    stream_order_events = aws_glue_job.stream_order_events.name
-    backfill_range      = aws_glue_job.backfill_range.name
+    raw_to_staging        = aws_glue_job.raw_to_staging.name
+    staging_to_curated    = aws_glue_job.staging_to_curated.name
+    reconcile             = aws_glue_job.reconcile.name
+    stream_order_events   = aws_glue_job.stream_order_events.name
+    backfill_range        = aws_glue_job.backfill_range.name
+    build_fact_order_line = aws_glue_job.build_fact_order_line.name
+    test_scd2_merge       = aws_glue_job.test_scd2_merge.name
   }
 }

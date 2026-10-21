@@ -13,11 +13,11 @@ history, snapshot isolation so a failed job never corrupts the table, and
 native support across Athena/Glue without a conversion step. **Three
 hardest problems solved**: (1) reconstructing two years of SCD Type 2
 history for `dim_product` from a price-change feed in one bulk pass, with a
-separate, genuinely different two-statement MERGE pattern for incremental
-runs (see `DATA_MODEL.md`); (2) getting a Spark streaming job's
-idempotent-insert path working at all — `MERGE INTO` is flatly disallowed
-inside a streaming micro-batch's execution thread in this Spark version,
-discovered via the actual traceback, not assumed; (3) two independent AWS
+separate single atomic MERGE for incremental runs, proven on a scratch table
+(see `DATA_MODEL.md`); (2) getting a Spark streaming job's idempotent-insert
+path working — four real bugs, from session-scoped temp views to a
+timezone parse that made every event "late" (see `docs/RUNBOOK.md`); (3) two
+independent AWS
 services (EMR Serverless, Kinesis) failing with the identical
 `SubscriptionRequiredException` on a brand-new account, requiring a
 same-day architecture pivot to Glue Jobs and a file-source streaming

@@ -79,22 +79,66 @@ CloudWatch alarm mechanism verified working end-to-end: `schema_drift_vs_previou
 genuinely transitioned to `ALARM` state after the metric push. SNS email
 subscription created but not yet confirmed (pending in your inbox).
 
-## Backfill idempotency (Week 5)
+## Revenue-safe fact: `fact_order_line` (added 2026-10-21)
 
-`jobs/batch/backfill_range.py` (parameterized by `--start_date`/`--end_date`,
-uses Iceberg `overwritePartitions()` rather than the initial load's
-`createOrReplace()`) run twice over the same range (2024-06-01..2024-06-07):
+`fact_order_item` repeats each line item's money columns on every status
+transition, so summing them overcounts (see `docs/DATA_MODEL.md`).
+`jobs/batch/build_fact_order_line.py` builds an accumulating-snapshot fact
+with one row per line item (Glue G.1X x4, 290 s):
 
-| Run | Row count | Distinct event_id |
+| Metric | Value |
+|---|---|
+| Line items | 26,151,177 = 26,149,825 batch + 1,352 streamed test lines |
+| Batch lines vs generated | 26,150,000 generated − 175 lines whose every event was quarantined |
+| Lines missing a `created` row (that event was quarantined as dirty) | 261,639 (1.0%) |
+| Lines currently `delivered` | 20,711,603 |
+| Average `hours_to_deliver` | 96.0 (the generator's delivery template) |
+| `SUM(net_amount)`, one row per line | 2,097,487,840.53 |
+| Naive `SUM(net_amount)` over `fact_order_item` | 7,910,576,081.14 |
+| **Overcount from summing the transition fact** | **3.771x** |
+
+## Incremental SCD2 MERGE test (added 2026-10-21)
+
+`jobs/batch/test_scd2_merge.py` applies one batch of price changes with
+`jobs/batch/scd2.py` to a scratch Iceberg table with the real `dim_product`
+schema, then re-applies it. **15/15 checks passed** on Glue: a two-change
+version chain with gap-free validity windows, exactly one current row per
+product, carried title/category, recomputed price_band, unique keys, a
+no-op change dropped, an unknown product ignored, and the second
+application changing nothing. The first attempt failed with `MERGE INTO
+TABLE is not supported temporarily` — Iceberg's Spark SQL extensions had
+never been enabled on the Glue jobs (see `docs/RUNBOOK.md`).
+
+## Backfill idempotency and blast radius (Week 5, re-done 2026-10-21)
+
+`jobs/batch/backfill_range.py` reprocesses an event-date range: it reads raw
+`ingest_date` from start to end + 1 day, keeps rows whose event date is in
+range, and writes with Iceberg overwrite-by-condition on that `event_ts`
+range (see `docs/RUNBOOK.md` for why the first version did not).
+
+**The first version (2026-08-26) passed its idempotency test but was not
+safe**: two runs gave identical counts (840,146) for 2024-06-01..06-07, yet
+they had overwritten 2024-05-31 down to 41 rows (from 119,798), replaced the
+whole quarantine table (997,170 -> 8,593 rows), and missed 44 late events
+from 06-07. The test only looked inside the range. Found on 2026-10-21,
+fixed, and the staging zone repaired by re-running `raw_to_staging` once.
+
+**Fixed version, run twice over 2024-06-01..2024-06-07 (2026-10-21)**,
+checking the range *and* the days on either side after each run against
+`curated.fact_order_item` (built before any backfill, so an independent
+reference):
+
+| Check | Run 1 | Run 2 |
 |---|---|---|
-| After run 1 | 840,146 | 840,146 |
-| After run 2 | 840,146 | 840,146 |
+| Clean rows written for the range | 840,190 | 840,190 |
+| Quarantined rows written for the range | 8,592 | 8,592 |
+| `staging.order_events` total | 98,637,863 | 98,637,863 |
+| `staging.order_events_quarantine` total | 997,170 | 997,170 |
+| Days 2024-05-29 .. 2024-06-10 matching the reference, per day | 13 / 13 | 13 / 13 |
 
-**Identical — the spec's "run it twice, show identical row counts" proof,
-executed for real.** See `docs/RUNBOOK.md` for an honest note on why this
-count (840,146) differs slightly from the original full-table load's count
-for the same date range (840,190) — a real ingest_date-vs-event_ts boundary
-effect with late-arriving data, not an idempotency failure.
+840,190 is exactly the full load's count for that event-date range — the
+late events the old version dropped are now included — and nothing outside
+the range changed.
 
 ## Cost
 

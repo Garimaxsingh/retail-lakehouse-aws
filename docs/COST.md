@@ -108,5 +108,22 @@ pending confirmation (check inbox).
 | 2026-08-26 | 5 | Backfill idempotency proof: 2 runs of `backfill_range.py` over the same 1-week range (2024-06-01..06-07), 124s each | ~$2 (planned) | ~$0.12 | Identical row counts both runs (840,146) — real proof, see RESULTS.md |
 | **Running total** | | | **~$127 planned (both projects)** | **~$5.5-5.8** | Weeks 2-5 core deliverables complete |
 
+**2026-10-21 — finding and fixing the backfill, SCD2 and MERGE issues:**
+
+| Date | Week | Item | Planned | Actual | Notes |
+|---|---|---|---|---|---|
+| 2026-10-21 | fixes | `test_scd2_merge` x2 (first failed: Iceberg SQL extensions not enabled), 391 DPU-s | — | ~$0.05 | 15/15 SCD2 checks passed on the second run |
+| 2026-10-21 | fixes | `build_fact_order_line` (G.1X x4, 290 s, 1,163 DPU-s) | — | ~$0.14 | 26,151,177 line items; 3.771x overcount measured |
+| 2026-10-21 | fixes | `raw_to_staging` re-run to repair staging after the backfill bug (G.1X x4, 2,575 s, 10,300 DPU-s) | — | ~$1.26 | The cost of the backfill bug: a full rebuild |
+| 2026-10-21 | fixes | S3 Glacier Instant Retrieval reads of the raw zone during the repair (~24 GB; raw/ transitions to GLACIER_IR after 30 days) | — | ~$0.7 (estimate) | Retrieval fee, not visible in Glue's DPU figures |
+| 2026-10-21 | fixes | `backfill_range` x3 (first failed on a PySpark wrapper bug), 1,427 DPU-s | — | ~$0.17 | Two clean runs, neighbouring days verified |
+| 2026-10-21 | fixes | Athena verification queries (bug confirmation + per-day checks) | — | ~$0.01 | |
+| **Running total** | | | | **~$7.8-8.1** | Includes ~$2.3 for finding and fixing the backfill/SCD2/MERGE issues |
+
+**Correction to the Week 3 row above**: "MERGE INTO disallowed inside
+streaming micro-batches" was the diagnosis at the time. The real cause was
+that the Glue jobs never enabled Iceberg's Spark SQL extensions — see
+docs/RUNBOOK.md.
+
 Update this table each session — actual spend goes in Cost Explorer, transcribe
 the delta here rather than trusting memory at Week 8.

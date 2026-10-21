@@ -95,9 +95,15 @@ print(f"[raw_to_staging] clean: {clean.count():,}, quarantined: {quarantine.coun
     .createOrReplace()
 )
 
+# Partitioned the same way as order_events. An unpartitioned quarantine
+# table made backfill_range.py's overwritePartitions() replace the WHOLE
+# table (997,170 rows -> 8,593) — dynamic overwrite on an unpartitioned
+# table has only one partition to replace. See docs/RUNBOOK.md.
 (
-    quarantine.writeTo(qualified("order_events_quarantine"))
+    quarantine.sort(F.to_date("event_ts"))
+    .writeTo(qualified("order_events_quarantine"))
     .using("iceberg")
+    .partitionedBy(F.days("event_ts"))
     .createOrReplace()
 )
 

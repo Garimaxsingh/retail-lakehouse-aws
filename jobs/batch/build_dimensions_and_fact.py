@@ -17,10 +17,8 @@ Builds:
 This script does the INITIAL bulk historical load — the generator produced
 two years of pre-existing history in one shot, so this reconstructs the full
 SCD2 timeline from staging.product_price_changes in a single pass. See
-merge_price_changes_incremental() at the bottom for the two-statement MERGE
-pattern a real *daily* incremental run would use instead — written and
-correct, but not exercised by this initial-load run since there's no "new
-batch of changes since yesterday" yet.
+jobs/batch/scd2.py for the single atomic MERGE a real *daily* incremental
+run uses instead (tested on a scratch table by jobs/batch/test_scd2_merge.py).
 """
 import sys
 
@@ -143,39 +141,11 @@ dim_product = spark.table(curated("dim_product"))
 print(f"[curated] dim_product: {dim_product.count():,} rows ({dim_product.where('is_current').count():,} current)")
 
 
-def merge_price_changes_incremental(new_changes: DataFrame) -> None:
-    """The two-statement MERGE pattern for a real *daily* incremental run —
-    not called by this initial-load script, but this is the pattern that
-    replaces build_dim_product() once the table already has history and
-    only a new day's worth of price_change rows need applying.
-
-    Two statements, not one: a single MERGE can't both close out the old
-    version AND insert the new one against the same matched natural key in
-    Iceberg — the classic SCD2-in-Iceberg trap.
-    """
-    new_changes.createOrReplaceTempView("incoming_changes")
-
-    # Step 1: close out rows whose price actually changed
-    spark.sql(f"""
-        MERGE INTO {curated('dim_product')} t
-        USING incoming_changes s
-        ON t.parent_asin = s.parent_asin AND t.is_current = true
-        WHEN MATCHED AND t.price <> s.new_price THEN
-          UPDATE SET t.valid_to = s.change_ts, t.is_current = false
-    """)
-
-    # Step 2: insert the new current version for whatever just got closed
-    spark.sql(f"""
-        MERGE INTO {curated('dim_product')} t
-        USING (
-            SELECT s.parent_asin, s.new_price AS price, s.change_ts AS valid_from
-            FROM incoming_changes s
-        ) s
-        ON t.parent_asin = s.parent_asin AND t.valid_from = s.valid_from
-        WHEN NOT MATCHED THEN
-          INSERT (parent_asin, price, valid_from, valid_to, is_current)
-          VALUES (s.parent_asin, s.price, s.valid_from, TIMESTAMP '{END_OF_TIME}', true)
-    """)
+# Incremental (daily) SCD2 updates do NOT use this bulk reconstruction —
+# see jobs/batch/scd2.py: apply_price_changes() applies a batch of price
+# changes in one atomic MERGE, and jobs/batch/test_scd2_merge.py proves it
+# on a scratch table. (An earlier two-statement version lived here; it was
+# not atomic and could create duplicate current rows — see DATA_MODEL.md.)
 
 
 # ============================================================ dim_seller ==

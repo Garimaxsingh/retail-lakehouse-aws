@@ -17,11 +17,9 @@ substitution:
      on event_id — reprocessing the same landed files (by resending the
      same event_ids in a new file, or clearing the checkpoint) must not
      change the row count. This is the file-source equivalent of "replay a
-     Kinesis shard from TRIM_HORIZON." (Not a MERGE — Spark 3.3 disallows
-     MERGE INTO from inside a streaming micro-batch's execution thread; an
-     anti-join + append is functionally identical for an insert-only path.
-     See the comment in process_batch for the actual traceback that ruled
-     MERGE out.)
+     Kinesis shard from TRIM_HORIZON." (Not a MERGE: an anti-join + append
+     is functionally identical for an insert-only path. See the note in
+     process_batch for why MERGE was dropped here.)
   2. Late data: 15-minute watermark. Events arriving later than that go to
      curated.fact_order_item_late, never silently dropped.
   3. Batch/stream reconciliation: unchanged — see jobs/batch/reconcile.py,
@@ -120,17 +118,13 @@ def process_batch(batch_df, batch_id: int) -> None:
         # which is where product_sk/seller_sk/customer_sk/date_key actually
         # get resolved correctly. See jobs/batch/reconcile.py.
         #
-        # NOTE: deliberately NOT using MERGE INTO here — Spark 3.3 (this
-        # Glue version) raises "MERGE INTO TABLE is not supported
-        # temporarily" when called from inside a streaming micro-batch's
-        # execution thread (a Spark-side restriction, not an Iceberg one;
-        # confirmed via the actual Py4J traceback, not assumed). Since the
-        # streaming path only ever INSERTs new rows (never updates an
-        # existing one), an anti-join against event_id + plain append is
-        # functionally identical to `WHEN NOT MATCHED THEN INSERT` and
-        # avoids the restriction entirely — this IS how idempotent-insert
-        # streaming upserts are commonly done when native MERGE isn't
-        # available inside foreachBatch.
+        # NOTE: not using MERGE INTO here. It originally failed with
+        # "MERGE INTO TABLE is not supported temporarily", first blamed on
+        # streaming; the real cause was the Glue jobs not enabling Iceberg's
+        # Spark SQL extensions (now set in infra/glue_jobs.tf — see
+        # docs/RUNBOOK.md). Since this path only ever INSERTs new rows, an
+        # anti-join on event_id + plain append is functionally identical to
+        # `WHEN NOT MATCHED THEN INSERT`, so it was kept.
         def shape(df, source_system: str):
             # Both sinks (fact_order_item, fact_order_item_late) share this
             # exact column shape — a prior bug had `late` skip this and go
