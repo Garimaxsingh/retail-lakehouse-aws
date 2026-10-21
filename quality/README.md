@@ -55,8 +55,8 @@ To re-push metrics from an existing log without re-running the queries:
 ## What's not built
 
 - Real daily cadence (`period=86400` in the CloudWatch alarms) — set to
-  300s instead so the alarm mechanism could actually be verified within
-  this session; a live pipeline would use the daily period.
+  300s instead so the alarm mechanism could actually be verified in a
+  single sitting; a live pipeline would use the daily period.
 - The price-distribution KS test never found a shift because the generator
   samples `unit_price` from a static base price throughout the whole
   dataset (not tied to the SCD2 price history) — genuinely nothing to
